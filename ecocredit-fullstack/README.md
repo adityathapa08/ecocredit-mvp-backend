@@ -1,6 +1,6 @@
 # EcoCredit - Full-stack Hackathon MVP
 
-EcoCredit is a campus circular marketplace for reusing useful items. Students can swap for Eco Points or sell for rupees with pay on delivery.
+EcoCredit is a campus circular marketplace for reusing useful items. Students can swap for Eco Points or sell for rupees with secure in-app wallet payment after acceptance.
 
 ## Included in V2
 
@@ -11,6 +11,15 @@ EcoCredit is a campus circular marketplace for reusing useful items. Students ca
 - Pending → accepted → delivered request flow, with a 7-day listing exchange window
 - Anonymous in-app chat after acceptance; phone numbers, emails, and social-media/contact details are blocked
 - Buyer rating after a delivered exchange
+- Live anonymous chat that polls for new messages while the chat window is open (no manual refresh)
+- Notification centre for requests, acceptance, messages, wallet activity, delivery, and ratings
+- EcoCredit wallet with add-money ledger entries, purchase settlement after a 5% platform fee, wallet history, and UPI withdrawal requests
+
+## Wallet safety note
+
+The wallet is deliberately a **demo simulation**: add-money and UPI withdrawal update the local SQLite ledger only. It does not collect money, connect to a bank, or send a real UPI transfer.
+
+For a real deployment, integrate a regulated payment provider (for example Razorpay), verify webhooks before crediting wallets, keep funds in a compliant escrow/settlement flow, encrypt sensitive data, and use a production database. Do not treat the demo ledger as a real payment system.
 
 ## Technology
 
