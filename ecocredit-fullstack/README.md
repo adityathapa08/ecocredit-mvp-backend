@@ -14,6 +14,7 @@ EcoCredit is a campus circular marketplace for reusing useful items. Students ca
 - Live anonymous chat that polls for new messages while the chat window is open (no manual refresh)
 - Notification centre for requests, acceptance, messages, wallet activity, delivery, and ratings
 - EcoCredit wallet with add-money ledger entries, purchase settlement after a 5% platform fee, wallet history, and UPI withdrawal requests
+- QR-only pickup confirmation: the seller shows a one-time QR after payment is held; the buyer scans it to release escrow payment
 
 ## Wallet safety note
 
