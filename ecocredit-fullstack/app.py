@@ -226,10 +226,17 @@ def profile():
     if not user: return jsonify({"error": "Please log in first."}), 401
     with closing(get_db()) as db:
         listings = db.execute("SELECT * FROM items WHERE owner_id = ? ORDER BY id DESC", (user["id"],)).fetchall()
-        requests = db.execute("""SELECT r.*, i.title, i.listing_type, i.rupees, i.points, i.owner_id, i.platform_fee
+        requests = db.execute("""SELECT r.*, i.title, i.listing_type, i.rupees, i.points, i.owner_id, i.platform_fee, i.location
                                FROM swap_requests r JOIN items i ON i.id = r.item_id WHERE r.requester_id = ? ORDER BY r.created_at DESC""", (user["id"],)).fetchall()
     rating = round(user["rating_total"] / user["rating_count"], 1) if user["rating_count"] else None
-    return jsonify({"user": {**dict(user), "rating": rating}, "listings": [dict(x) for x in listings], "requests": [dict(x) for x in requests]})
+    request_data = []
+    for row in requests:
+        item = dict(row)
+        # The pickup point for a paid listing is private until funds are held in escrow.
+        item["pickup_location"] = item["location"] if item["listing_type"] == "sell" and item["payment_status"] in ("held", "released") else None
+        item.pop("location", None)
+        request_data.append(item)
+    return jsonify({"user": {**dict(user), "rating": rating}, "listings": [dict(x) for x in listings], "requests": request_data})
 
 
 @app.put("/api/profile")
@@ -358,19 +365,16 @@ def pay_for_request(request_id: int):
         row = request_for_member(db, request_id, buyer["id"])
         if not row or row["requester_id"] != buyer["id"] or row["status"] != "accepted": return jsonify({"error": "Accepted purchase not found."}), 404
         if row["listing_type"] != "sell": return jsonify({"error": "Wallet payment is only needed for rupee listings."}), 400
-        if row["payment_status"] == "paid": return jsonify({"error": "This purchase has already been paid."}), 409
+        if row["payment_status"] in ("held", "released"): return jsonify({"error": "This purchase has already been paid."}), 409
         balance = db.execute("SELECT wallet_balance FROM users WHERE id=?", (buyer["id"],)).fetchone()["wallet_balance"]
         if balance < row["rupees"]: return jsonify({"error": f"Insufficient wallet balance. Add ₹{row['rupees'] - balance} first."}), 400
-        seller_amount = row["rupees"] - row["platform_fee"]
         db.execute("UPDATE users SET wallet_balance = wallet_balance - ? WHERE id=?", (row["rupees"], buyer["id"]))
-        db.execute("UPDATE users SET wallet_balance = wallet_balance + ? WHERE id=?", (seller_amount, row["owner_id"]))
-        db.execute("UPDATE swap_requests SET payment_status='paid' WHERE id=?", (request_id,))
-        db.execute("INSERT INTO wallet_transactions (user_id, amount, transaction_type, note, request_id) VALUES (?, ?, 'purchase', ?, ?)", (buyer["id"], -row["rupees"], f"Payment for {row['title']}", request_id))
-        db.execute("INSERT INTO wallet_transactions (user_id, amount, transaction_type, note, request_id) VALUES (?, ?, 'sale', ?, ?)", (row["owner_id"], seller_amount, f"Sale of {row['title']} after ₹{row['platform_fee']} platform fee", request_id))
-        add_notification(db, buyer["id"], f"₹{row['rupees']} paid for {row['title']}.", "payment", request_id)
-        add_notification(db, row["owner_id"], f"You received ₹{seller_amount} for {row['title']} after the 5% platform fee.", "payment", request_id)
+        db.execute("UPDATE swap_requests SET payment_status='held' WHERE id=?", (request_id,))
+        db.execute("INSERT INTO wallet_transactions (user_id, amount, transaction_type, note, request_id) VALUES (?, ?, 'escrow_hold', ?, ?)", (buyer["id"], -row["rupees"], f"Funds held for {row['title']} until delivery confirmation", request_id))
+        add_notification(db, buyer["id"], f"₹{row['rupees']} is safely held for {row['title']}. Confirm delivery to release payment.", "payment", request_id)
+        add_notification(db, row["owner_id"], f"Payment for {row['title']} is held securely. It will be released after the buyer confirms delivery.", "payment", request_id)
         db.commit()
-    return jsonify({"message": f"Payment complete. ₹{seller_amount} was credited to the seller wallet after the 5% fee."})
+    return jsonify({"message": "Payment is held securely. It will be released to the seller after you confirm delivery."})
 
 
 @app.post("/api/requests/<int:request_id>/complete")
@@ -380,10 +384,16 @@ def complete_request(request_id: int):
     with closing(get_db()) as db:
         row = request_for_member(db, request_id, user["id"])
         if not row or row["requester_id"] != user["id"] or row["status"] != "accepted": return jsonify({"error": "Accepted request not found."}), 404
-        if row["listing_type"] == "sell" and row["payment_status"] != "paid": return jsonify({"error": "Pay through your EcoCredit wallet before marking this purchase delivered."}), 400
+        if row["listing_type"] == "sell" and row["payment_status"] != "held": return jsonify({"error": "Pay through your EcoCredit wallet before marking this purchase delivered."}), 400
         db.execute("UPDATE swap_requests SET status='delivered' WHERE id=?", (request_id,))
+        if row["listing_type"] == "sell":
+            seller_amount = row["rupees"] - row["platform_fee"]
+            db.execute("UPDATE users SET wallet_balance = wallet_balance + ? WHERE id=?", (seller_amount, row["owner_id"]))
+            db.execute("UPDATE swap_requests SET payment_status='released' WHERE id=?", (request_id,))
+            db.execute("INSERT INTO wallet_transactions (user_id, amount, transaction_type, note, request_id) VALUES (?, ?, 'sale_release', ?, ?)", (row["owner_id"], seller_amount, f"Escrow released for {row['title']} after ₹{row['platform_fee']} platform fee", request_id))
+            add_notification(db, row["owner_id"], f"₹{seller_amount} for {row['title']} was released to your wallet after the 5% platform fee.", "payment", request_id)
         add_notification(db, row["owner_id"], f"{row['title']} was marked delivered. The buyer can now rate the exchange.", "delivered", request_id); db.commit()
-    return jsonify({"message": "Marked as delivered. You can now rate the exchange."})
+    return jsonify({"message": "Marked as delivered. The held payment has been released to the seller wallet after the 5% fee." if row["listing_type"] == "sell" else "Marked as delivered. You can now rate the exchange."})
 
 
 @app.post("/api/users/<int:user_id>/rating")
