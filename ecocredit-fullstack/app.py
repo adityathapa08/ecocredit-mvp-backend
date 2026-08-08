@@ -77,6 +77,10 @@ def seed_database() -> None:
         db.commit()
 
 
+# Run this when Flask is imported by Gunicorn as well as when app.py is run locally.
+seed_database()
+
+
 @app.get("/")
 def home():
     return render_template("index.html")
@@ -176,5 +180,4 @@ def stats():
 
 
 if __name__ == "__main__":
-    seed_database()
     app.run(debug=True)
