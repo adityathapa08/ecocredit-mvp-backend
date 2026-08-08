@@ -1,6 +1,16 @@
 # EcoCredit - Full-stack Hackathon MVP
 
-EcoCredit helps verified campus students exchange useful items rather than buying new ones. This MVP includes login, item listings, swap requests, Eco Points, and an SQLite database.
+EcoCredit is a campus circular marketplace for reusing useful items. Students can swap for Eco Points or sell for rupees with pay on delivery.
+
+## Included in V2
+
+- Separate account creation and login
+- Private profile dashboard for editing campus details, listings, and requests
+- Search plus Books, Furniture, Electronics, and Clothing categories
+- Required condition, photo, actual price, selling price, and 5% platform-fee notice
+- Pending → accepted → delivered request flow, with a 7-day listing exchange window
+- Anonymous in-app chat after acceptance; phone numbers, emails, and social-media/contact details are blocked
+- Buyer rating after a delivered exchange
 
 ## Technology
 
@@ -21,7 +31,7 @@ python app.py
 
 4. Open `http://127.0.0.1:5000` in your browser.
 
-Use any college email and a password of at least 4 characters. This is demo authentication; use real password verification and a strong `SECRET_KEY` before public deployment.
+Create an account with a college email and a password of at least 4 characters. This remains a hackathon demo: set a strong `SECRET_KEY`, use a production database, and add genuine college-email verification before public deployment.
 
 ## GitHub note
 
