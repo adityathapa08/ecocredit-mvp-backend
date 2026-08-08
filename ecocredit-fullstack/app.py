@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import base64
+import io
 import os
 import re
+import secrets
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, render_template, request, session
 from werkzeug.security import check_password_hash, generate_password_hash
+import qrcode
 
 BASE_DIR = Path(__file__).resolve().parent
 DATABASE = BASE_DIR / "ecocredit.db"
@@ -72,6 +76,7 @@ def seed_database() -> None:
             CREATE TABLE IF NOT EXISTS swap_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, requester_id INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'pending', payment_status TEXT NOT NULL DEFAULT 'not_required',
+                delivery_token TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(item_id) REFERENCES items(id), FOREIGN KEY(requester_id) REFERENCES users(id)
             );
@@ -101,6 +106,8 @@ def seed_database() -> None:
         request_columns = {row[1] for row in db.execute("PRAGMA table_info(swap_requests)")}
         if "payment_status" not in request_columns:
             db.execute("ALTER TABLE swap_requests ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'not_required'")
+        if "delivery_token" not in request_columns:
+            db.execute("ALTER TABLE swap_requests ADD COLUMN delivery_token TEXT")
         item_columns = {row[1] for row in db.execute("PRAGMA table_info(items)")}
         for column, definition in (("listing_type", "TEXT NOT NULL DEFAULT 'swap'"), ("rupees", "INTEGER"), ("image_data", "TEXT DEFAULT ''"), ("actual_price", "INTEGER"), ("exchange_deadline", "TEXT"), ("owner_id", "INTEGER"), ("platform_fee", "INTEGER NOT NULL DEFAULT 0")):
             if column not in item_columns:
@@ -226,7 +233,7 @@ def profile():
     if not user: return jsonify({"error": "Please log in first."}), 401
     with closing(get_db()) as db:
         listings = db.execute("SELECT * FROM items WHERE owner_id = ? ORDER BY id DESC", (user["id"],)).fetchall()
-        requests = db.execute("""SELECT r.*, i.title, i.listing_type, i.rupees, i.points, i.owner_id, i.platform_fee, i.location
+        requests = db.execute("""SELECT r.id, r.item_id, r.requester_id, r.status, r.payment_status, r.created_at, i.title, i.listing_type, i.rupees, i.points, i.owner_id, i.platform_fee, i.location
                                FROM swap_requests r JOIN items i ON i.id = r.item_id WHERE r.requester_id = ? ORDER BY r.created_at DESC""", (user["id"],)).fetchall()
     rating = round(user["rating_total"] / user["rating_count"], 1) if user["rating_count"] else None
     request_data = []
@@ -369,16 +376,18 @@ def pay_for_request(request_id: int):
         balance = db.execute("SELECT wallet_balance FROM users WHERE id=?", (buyer["id"],)).fetchone()["wallet_balance"]
         if balance < row["rupees"]: return jsonify({"error": f"Insufficient wallet balance. Add ₹{row['rupees'] - balance} first."}), 400
         db.execute("UPDATE users SET wallet_balance = wallet_balance - ? WHERE id=?", (row["rupees"], buyer["id"]))
-        db.execute("UPDATE swap_requests SET payment_status='held' WHERE id=?", (request_id,))
+        delivery_token = secrets.token_urlsafe(32)
+        db.execute("UPDATE swap_requests SET payment_status='held', delivery_token=? WHERE id=?", (delivery_token, request_id))
         db.execute("INSERT INTO wallet_transactions (user_id, amount, transaction_type, note, request_id) VALUES (?, ?, 'escrow_hold', ?, ?)", (buyer["id"], -row["rupees"], f"Funds held for {row['title']} until delivery confirmation", request_id))
         add_notification(db, buyer["id"], f"₹{row['rupees']} is safely held for {row['title']}. Confirm delivery to release payment.", "payment", request_id)
-        add_notification(db, row["owner_id"], f"Payment for {row['title']} is held securely. It will be released after the buyer confirms delivery.", "payment", request_id)
+        add_notification(db, row["owner_id"], f"Payment for {row['title']} is held securely. Show the pickup QR at handover to release it.", "payment", request_id)
         db.commit()
-    return jsonify({"message": "Payment is held securely. It will be released to the seller after you confirm delivery."})
+    return jsonify({"message": "Payment is held securely. Collect the item, then scan the seller pickup QR code."})
 
 
 @app.post("/api/requests/<int:request_id>/complete")
 def complete_request(request_id: int):
+    return jsonify({"error": "Use QR handover confirmation to release this payment."}), 410
     user = current_user()
     if not user: return jsonify({"error": "Please log in first."}), 401
     with closing(get_db()) as db:
@@ -394,6 +403,53 @@ def complete_request(request_id: int):
             add_notification(db, row["owner_id"], f"₹{seller_amount} for {row['title']} was released to your wallet after the 5% platform fee.", "payment", request_id)
         add_notification(db, row["owner_id"], f"{row['title']} was marked delivered. The buyer can now rate the exchange.", "delivered", request_id); db.commit()
     return jsonify({"message": "Marked as delivered. The held payment has been released to the seller wallet after the 5% fee." if row["listing_type"] == "sell" else "Marked as delivered. You can now rate the exchange."})
+
+
+@app.get("/api/requests/<int:request_id>/pickup-qr")
+def pickup_qr(request_id: int):
+    """Show the seller a QR only after the buyer's funds are held in escrow."""
+    seller = current_user()
+    if not seller:
+        return jsonify({"error": "Please log in first."}), 401
+    with closing(get_db()) as db:
+        row = request_for_member(db, request_id, seller["id"])
+        if not row or row["owner_id"] != seller["id"] or row["status"] != "accepted" or row["payment_status"] != "held":
+            return jsonify({"error": "A pickup QR is available only for an accepted order with payment held."}), 403
+        token = db.execute("SELECT delivery_token FROM swap_requests WHERE id=?", (request_id,)).fetchone()["delivery_token"]
+    if not token:
+        return jsonify({"error": "Pickup QR is not ready yet."}), 400
+    image = qrcode.make(f"ECOCREDIT:{request_id}:{token}")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return jsonify({"qr_image": f"data:image/png;base64,{encoded}"})
+
+
+@app.post("/api/requests/<int:request_id>/confirm-handover")
+def confirm_handover(request_id: int):
+    """Buyer scans the seller QR; this is the only action that releases escrow."""
+    buyer = current_user()
+    qr_text = str((request.get_json(silent=True) or {}).get("qr_text", "")).strip()
+    if not buyer:
+        return jsonify({"error": "Please log in first."}), 401
+    with closing(get_db()) as db:
+        row = request_for_member(db, request_id, buyer["id"])
+        if not row or row["requester_id"] != buyer["id"] or row["status"] != "accepted":
+            return jsonify({"error": "Active purchase not found."}), 404
+        secure = db.execute("SELECT delivery_token FROM swap_requests WHERE id=?", (request_id,)).fetchone()
+        if row["listing_type"] != "sell" or row["payment_status"] != "held":
+            return jsonify({"error": "This purchase is not awaiting secure handover confirmation."}), 400
+        expected = f"ECOCREDIT:{request_id}:{secure['delivery_token']}"
+        if not secure["delivery_token"] or not secrets.compare_digest(qr_text, expected):
+            return jsonify({"error": "Invalid pickup QR. Scan the seller's current EcoCredit QR code."}), 400
+        seller_amount = row["rupees"] - row["platform_fee"]
+        db.execute("UPDATE swap_requests SET status='delivered', payment_status='released', delivery_token=NULL WHERE id=?", (request_id,))
+        db.execute("UPDATE users SET wallet_balance=wallet_balance+? WHERE id=?", (seller_amount, row["owner_id"]))
+        db.execute("INSERT INTO wallet_transactions (user_id, amount, transaction_type, note, request_id) VALUES (?, ?, 'sale_release', ?, ?)", (row["owner_id"], seller_amount, f"QR escrow release for {row['title']} after ₹{row['platform_fee']} platform fee", request_id))
+        add_notification(db, buyer["id"], f"Handover confirmed. Payment for {row['title']} was released.", "delivered", request_id)
+        add_notification(db, row["owner_id"], f"₹{seller_amount} for {row['title']} was released to your wallet after the 5% fee.", "payment", request_id)
+        db.commit()
+    return jsonify({"message": "Handover confirmed. Payment was released to the seller wallet."})
 
 
 @app.post("/api/users/<int:user_id>/rating")
