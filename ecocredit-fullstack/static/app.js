@@ -16,7 +16,11 @@ async function api(url, options = {}) {
 }
 
 function itemCard(item) {
-  return `<article class="item-card"><div class="item-visual">${item.emoji}</div><div class="item-body"><span class="item-meta">${item.category.toUpperCase()} · ${item.item_condition.toUpperCase()}</span><h3>${item.title}</h3><p>${item.location} · Listed by ${item.owner_name}</p><div class="item-bottom"><span>✦ ${item.points} points</span><button class="request" data-request="${item.id}">Request</button></div></div></article>`;
+  const visual = item.image_data ? `<img src="${item.image_data}" alt="${item.title}">` : item.emoji;
+  const isSale = item.listing_type === 'sell';
+  const value = isSale ? `₹${item.rupees} · Pay on delivery` : `✦ ${item.points} Eco Points`;
+  const action = isSale ? 'Buy - POD' : 'Request swap';
+  return `<article class="item-card"><div class="item-visual">${visual}</div><div class="item-body"><span class="item-meta">${isSale ? 'SELL · PAY ON DELIVERY' : 'SWAP · ECO POINTS'} · ${item.item_condition.toUpperCase()}</span><h3>${item.title}</h3><p>${item.location} · Listed by ${item.owner_name}</p><div class="item-bottom"><span>${value}</span><button class="request" data-request="${item.id}">${action}</button></div></div></article>`;
 }
 
 async function loadItems() {
@@ -52,8 +56,11 @@ $('#loginForm').addEventListener('submit', async (event) => {
 
 $('#itemForm').addEventListener('submit', async (event) => {
   event.preventDefault();
+  const listingType = document.querySelector('input[name="listingType"]:checked').value;
+  const imageFile = $('#itemImage').files[0];
+  const imageData = imageFile ? await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(imageFile); }) : '';
   try {
-    const data = await api('/api/items', { method: 'POST', body: JSON.stringify({ title: $('#itemTitle').value, category: $('#itemCategory').value, condition: $('#itemCondition').value, location: $('#itemLocation').value, points: $('#itemPoints').value }) });
+    const data = await api('/api/items', { method: 'POST', body: JSON.stringify({ title: $('#itemTitle').value, category: $('#itemCategory').value, condition: $('#itemCondition').value, location: $('#itemLocation').value, listing_type: listingType, points: $('#itemPoints').value, rupees: $('#itemRupees').value, image_data: imageData }) });
     $('#formMessage').textContent = data.message;
     $('#itemForm').reset();
     loadItems(); api('/api/me').then(data => { $('#points').textContent = data.user.eco_points; });
@@ -61,6 +68,7 @@ $('#itemForm').addEventListener('submit', async (event) => {
 });
 
 $('#openList').addEventListener('click', openModal); $('#heroList').addEventListener('click', openModal); $('#closeModal').addEventListener('click', closeModal);
+document.querySelectorAll('input[name="listingType"]').forEach(radio => radio.addEventListener('change', () => { const selling = radio.value === 'sell' && radio.checked; $('#pointsField').hidden = selling; $('#rupeesField').hidden = !selling; }));
 $('#logout').addEventListener('click', async () => { await api('/api/auth/logout', { method: 'POST' }); $('#app').hidden = true; $('#loginPage').hidden = false; });
 $('#filters').addEventListener('click', (event) => { if (!event.target.dataset.category) return; selectedCategory = event.target.dataset.category; document.querySelectorAll('#filters button').forEach(button => button.classList.toggle('active', button === event.target)); loadItems(); });
 
